@@ -1,0 +1,421 @@
+---
+title: "Beer case"
+author: "Bitch"
+date: "01/07/2020"
+output:
+  word_document: default
+  html_document: default
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(knitr::opts_chunk$set(cache = T,echo = FALSE, comment = NA, message = FALSE,warning = F))
+library(tidyverse)
+library(pscl)
+library(gridExtra)
+library(kableExtra)
+library(readxl)
+library(lubridate)
+library(MASS)
+library(showtext)
+library(rpart.plot)
+library(rpart)
+#model table
+library(sjPlot)
+library(sjmisc)
+library(sjlabelled)
+#AIC wiqid
+library(wiqid)
+vendor <- read_excel("vendor.xlsx")
+beer_sale=read_excel("beer_sale.xlsx")
+vendor=vendor%>%
+   mutate_if(is.character,as.factor)
+beer_sale=beer_sale%>%
+   mutate_if(is.character,as.factor)
+
+
+```
+三国分立 总公司旗下的产品个数 (条形图 dodge 排开)
+```{r}
+
+product=beer_sale%>%
+   dplyr::select(beer_brand_enum,beer_sub_brand_enum,beer_manufacturer_enum)
+product=product%>%
+  unique()
+# product%>%
+#   arrange(beer_manufacturer_enum)%>%
+#   kable()
+
+  table(product$beer_manufacturer_enum)%>%
+    sort(decreasing = T)%>%
+    data.frame()%>%
+    ggplot(aes(x=Var1,y=Freq))+
+    geom_col()+
+    theme(axis.text.x = element_text(angle = 45))+
+    labs(x="总公司",y="子品牌的数量",title="各公司旗下子品牌的数量")
+    
+
+```
+
+abi占有-店家数量,我们很好奇每个店有多少款abi产品, 
+abi卖不动的店里 有多少是不进abi啤酒的
+策略一:像没有进百威啤酒的地方买啤酒
+他们为什么不进百威啤酒???
+```{r}
+percentage=vendor%>%
+  mutate(abi_percentage=ifelse(beer_sales_volume_num!=0, abi_beer_sales_volume_num/beer_sales_volume_num*100,
+                           0))%>%
+  arrange(desc(abi_percentage))
+#在知道了各店的abi占有后我们很好奇每个店有多少款abi产品, abi卖不动的店里 有多少是不进abi啤酒的
+vendor%>%
+  inner_join(percentage)->percentage
+percentage%>%
+  ggplot(aes(x=abi_percentage))+
+  geom_histogram(bins = 20,color="white")+
+  labs(x="sales proportion",y="Quantity",title="Distribution of abi sales")
+#在知道了各店的abi 占有后我们很好奇每个店有多少款abi产品, abi卖不动的店里有多少是不进abi啤酒的
+percentage%>%
+  ggplot(aes(x=abi_beer_sku_num,y=abi_percentage,color=factor(abi_beer_sku_num),))+
+  geom_point(alpha=0.3)+
+  geom_count()+
+  labs(x="Number of Products",y="Sales proportion",title="Relationship between Products number and Proportion")+
+  scale_color_discrete(name="ABI Products number")
+
+# percentage%>%
+#   filter(abi_beer_sku_num==0)%>%
+#   summarise(number=n())
+```
+定价和各个产品销量的关系 想必是直接的
+各个产品所在定价区间
+Feature engineering 考虑每升价格  
+注意套餐和非套餐要切割开
+套餐里面不知道卖的产品价格几何
+套餐本身有促销的效果
+可以单独分析
+```{r,fig.showtext=TRUE}
+attach(beer_sale)
+bundle=beer_sale[grepl("套餐",sku_cls_desc)|grepl("套餐",sku_name),]
+
+beer_sale=beer_sale[!(grepl("套餐",sku_cls_desc)|grepl("套餐",sku_name)),]  #套餐非套餐切割
+detach(beer_sale)
+beer_sale%>%
+  mutate(price_perLitre=discount_price_num/(single_pack_num)/`single_pack_beer_volume_num(l)`)%>%
+  mutate_if(is.character,as.factor)->beer_sale        
+
+beer_sale%>%
+  group_by(beer_sub_brand_enum,beer_manufacturer_enum)%>%
+  summarise(average_price=mean(price_perLitre),average_sales=mean(sales_volume_num*100*`whole_pack_beer_volume_num(hl)`))%>%
+  filter(average_sales>0)%>%
+  ggplot(aes(x=average_price,y=average_sales,color=beer_manufacturer_enum))+
+  geom_point(alpha=0.05)+
+  geom_text(aes(label=beer_sub_brand_enum),size=2.5)+
+  labs(x="各子品牌平均销售价格",y="平均销售体积(升)",title="价格-销量关系")+
+  scale_color_discrete(name="所属母公司")
+
+quantile(beer_sale$price_perLitre,probs = c(0.05,0.25,0.5,0.75,0.95))
+
+```
+啤酒需求量高的店
+```{r}
+#需求量超100
+VIP_morethan_100=vendor%>%
+  mutate(avg_beer_price=beer_sales_value_cny_amt/`beer_sales_by_volume_num(hl)`/100,avg_product_price=sales_value_cny_amt/sales_volume_num)%>%
+  filter(beer_sales_volume_num>60)
+anova%>%
+   mutate(convert=sales_volume/sales_volume_num)%>%
+  ggplot(aes(x=beer_sales_volume_num,fill=platform_enum))+
+  geom_histogram(position = "stack",binwidth =1)+
+  xlim(0,500)+
+  labs(x="转化率",y="外卖平台",title="转化率分布")
+
+ggsave("2.png")
+```
+总订单转换为啤酒订单 不同店间的转化率差异明显吗 
+订单转化率集中在1%内 
+很多店有流量却卖不出啤酒
+
+```{r}
+# convert=vendor%>%
+#   dplyr::select(sales_volume_num,beer_sales_volume_num)%>%
+#   mutate(convert_rate=ifelse(sales_volume_num!=0,beer_sales_volume_num/sales_volume_num*100,0))
+
+vendor%>%
+  filter(sales_volume_num>0)%>%
+  dplyr::select(sales_volume_num,beer_sales_volume_num)%>%
+  mutate(convert_rate=ifelse(sales_volume_num!=0,beer_sales_volume_num/sales_volume_num*100,0))%>%
+  ggplot(aes(x=convert_rate))+
+  geom_histogram(binwidth = 0.1)+
+  xlim(0,25)+
+  ylim(0,400)
+
+# vendor[vendor$sales_volume_num<vendor$order_num,]%>%
+#   select(order_num,sales_volume_num,beer_sales_volume_num,everything())%>%
+#   View()
+```
+
+假定商家的订单数是由于其口味等核心竞争力决定,这不是我们卖啤酒的该操心的. 我们的啤酒再好喝, 不可能因为啤酒增加订单
+订单与啤酒间的转换问题用poisson 
+研究同一家啤酒订单的分配问题poisson
+
+整理 price 取log
+
+分配问题
+sku_name 太乱了
+*vendor   All vendors sell beers  
+"0 sales therefore 0 beer sale" 
+"sales>0 but no beer sale"
+
+
+各个牌子的啤酒订单~(
+vendor.平台 vendor.菜系 vendor.评分 vendor.时间 vendor.offset(beer_订单数) 
+log(price_perlitre) sku_name
+beer_sale.single_pack_num 与 beer_sale.pack unit 体现包装
+)
+```{r}
+
+vendor%>%
+  ggplot(aes(beer_sales_volume_num))+
+  geom_histogram(binwidth = 1,col="white")+
+  xlim(0,250)+
+  ylim(0,500)+
+  labs(title="The distribution of sales")
+
+```
+**poc3158 不知道菜系 但是好在他没卖出啤酒 不予讨论
+**poc347
+fearture engineering, 把形如['00:00-00:30', '15:00-23:59']求出时间长度,结合night_flg 刻画营业的时间模式
+```{r}
+
+
+# gsub("","",as.character(mu$open_time[1]))
+# 
+# gsub(,strsplit(as.character(mu$open_time[50]),"-"),)
+# 
+# lapply(mu,function(x)which(is.na(x)))  #查看数据框空值
+# mu[is.na(mu$sub_channel_enum),] ##有个直接没卖啤酒 不理他
+
+#只剩下5个空值 我们来处理一下好了
+#有一个直觉 做夜宵的都是辣菜 时间和菜系应该是相关的
+#tmd open_time 太多了 正则表达式我也只能做成夜宵和非夜宵 但是这样损失太多信息
+#我想求营业时长 以及是否是夜宵
+
+deal=function(text){remove=gsub(pattern="\\[|\\]|\\s|\\'","",text)
+
+remove_comma=unlist(strsplit(remove,split = ","))
+
+
+
+duration_diy=function(x){
+remove=unlist(strsplit(x,"\\-|\\/"))
+if(nchar(remove[1])>5) remove=gsub(":\\d+$","",remove)##过长的弄短
+                        diff=hm(remove[2])-hm(remove[1])
+                                       
+                       return(abs(as.numeric(diff,units="hours")))}
+
+
+
+
+
+sum_time=sum(unlist(lapply(remove_comma,function(x)duration_diy(x))))
+return(sum_time)
+}
+vendor%>%
+  filter(!is.na(open_time))%>%
+mutate(open_sum=sapply(open_time,deal))->vendor
+```
+
+
+```{r}
+# model_poisson=glm(formula = sales_volume_num ~ offset(log(beer_sales_volume_num)) + 
+#     sum + beer_sub_brand_enum + platform_enum + sub_channel_enum + 
+#     night_flg + rating_score_num  + single_pack_unit + price_perLitre+
+#     single_pack_num, family = poisson(), data = mu)
+# summary(model_poisson)
+#
+
+
+
+
+
+
+anova=beer_sale%>%
+  dplyr::select(sales_volume=sales_volume_num,everything())%>%
+  inner_join(vendor,by=c("check_id"="check_id","poc_name_dummy"="poc_name_dummy","platform_enum"="platform_enum"))%>%
+  filter(beer_sales_volume_num>0)
+
+
+anova%>%
+  filter(sales_volume_num>424)%>%
+hurdle(offset=log(sales_volume_num),
+    formula=sales_volume ~ beer_sub_brand_enum+discount_price_num+ 
+     platform_enum + sku_num +  sub_channel_enum+
+    beer_sku_num + rating_score_num + night_flg+open_sum+
+      single_pack_unit +
+    single_pack_num,link = "logit",dist="poisson", data =.)->Hurdle
+
+summary(Hurdle)
+##检验
+ggplot(data=NULL,aes(x=(fitted(Hurdle))^0.5,y=abs(residuals.glm(Hurdle,type = "response"))))+
+  geom_point()+
+  labs(x="拟合均值",y="残差平方",title="检测overdispersion")
+
+
+ggplot(data=NULL,aes(x=fitted(Hurdle),y=residuals.glm(Hurdle,type = "response")^2))+
+  geom_point()+
+  stat_function(fun=function(x) x+x^2/Hurdle$theta)
+
+dp=sum(residuals(Hurdle,type = "pearson")^2)/Hurdle$df.residual
+anova%>%
+  filter(sales_volume_num>424)%>%
+hurdle(offset=log(sales_volume_num),
+    formula=sales_volume ~ beer_sub_brand_enum+discount_price_num+ 
+     platform_enum + sku_num +  sub_channel_enum+
+    beer_sku_num + rating_score_num + night_flg+open_sum+
+      single_pack_unit +
+    single_pack_num,link = "logit",dist="negbin", data =.)->negbin
+summary(negbin)
+summary(Hurdle)
+plot_model(negbin)
+```
+
+
+```{r}
+# Binomial=glm(response~beer_sub_brand_enum+ 
+#      platform_enum + sku_num +  
+#     beer_sku_num + rating_score_num + night_flg+open_sum+
+#       single_pack_unit +
+#     single_pack_num, family = binomial,data=anova,control=glm.control(maxit=50))
+# summary(Binomial)
+# stepAIC(Binomial)
+# car::vif(Binomial)
+
+#Tree
+tree_product=rpart(cbind(sales_volume_num,sales_volume)~beer_sub_brand_enum+discount_price_num+ 
+     platform_enum + sku_num +  sub_channel_enum+
+beer_sku_num + rating_score_num + night_flg+open_sum+
+      single_pack_unit + 
+    single_pack_num,data=anova,method = "poisson")
+plotcp(tree_product)
+pruned=rpart(cbind(sales_volume_num,sales_volume)~beer_sub_brand_enum+discount_price_num+ 
+     platform_enum + sku_num +  sub_channel_enum+
+beer_sku_num + rating_score_num + night_flg+open_sum+
+      single_pack_unit + 
+    single_pack_num,data=anova,method = "poisson",cp=0.012)
+plot=rpart.plot(pruned,main="变量的重要程度",cex=0.6)
+
+split.fun <- function(x, labs, digits, varlen, faclen)
+{
+    # replace commas with spaces (needed for strwrap)
+    labs <- gsub(",", " ", labs)
+    for(i in 1:length(labs)) {
+        # split labs[i] into multiple lines
+        labs[i] <- paste(strwrap(labs[i], width=25), collapse="\n")
+    }
+    labs
+}
+
+prp(pruned, split.fun=split.fun,cex=0.7)
+```
+
+
+
+```{r}
+
+
+
+# beer=vendor%>%
+#   mutate(avg_beer_price=beer_sales_value_cny_amt/`beer_sales_by_volume_num(hl)`,avg_product_price=sales_value_cny_amt/sales_volume_num)
+# 
+# beer=beer%>%
+#   filter(sales_volume_num>0)
+#   beer_poisson=glm(data=beer,family = poisson(link="log"),beer_sales_volume_num~offset(log(sales_volume_num))+avg_beer_price+avg_product_price+  #价格
+#                    poc_chain_num+#连锁店
+#                    sub_channel_enum+ #菜系
+#                 platform_enum+  #平台
+#                   sku_num+beer_sku_num+rating_score_num+ #好酒配好菜
+#                   night_flg+open_sum       #夜宵
+#   )
+# beer_poisson=glm(formula = beer_sales_volume_num ~ avg_beer_price + avg_product_price + 
+#     poc_chain_num + sub_channel_enum + platform_enum + sku_num + 
+#     beer_sku_num + rating_score_num + night_flg + offset(log(sales_volume_num)), 
+#     family = "poisson", data = beer)
+
+# stepAIC(beer_poisson)
+# summary(beer_poisson)
+# tab_model(beer_poisson)
+# car::vif(beer_poisson)%>%
+#   kable()
+
+```
+
+
+```{r}
+beer_involved=bundle%>%
+  rename(sales_volume=sales_volume_num)
+
+discount_fix=beer_involved%>%
+  dplyr::select(discount_price_num,`whole_pack_beer_volume_num(hl)`,sales_volume,everything())%>%
+  inner_join(vendor,by=c("check_id"="check_id","platform_enum"="platform_enum","poc_name_dummy"="poc_name_dummy"))%>%
+  filter(sales_volume_num>0)
+###get an average price_perlitre by sub brand df to fix the discount price by multiplying the Litre
+sale_price=anova%>%
+  group_by(beer_sub_brand_enum)%>%
+  summarise(avg_price_perLitre=mean(price_perLitre))
+beer_involved=discount_fix%>%
+  inner_join(sale_price)%>%
+  mutate(discount_price_num=avg_price_perLitre*`whole_pack_beer_volume_num(hl)`*100)
+#把用了bundle的店挑出来,看看其实际的特定啤酒销量,是否高于线性回归预测值,或者决策树预测值--对应着无营销操作.
+beer_involved$price_num=as.numeric(beer_involved$price_num)
+beer_sale=beer_sale%>%
+  dplyr::select(sales_volume=sales_volume_num,everything())%>%
+  inner_join(vendor,by=c("check_id"="check_id","poc_name_dummy"="poc_name_dummy","platform_enum"="platform_enum"))
+two_choice_no_deal=beer_sale%>%
+  semi_join(bundle,by=c("poc_name_dummy","beer_sub_brand_enum"))
+
+only_deal=beer_involved%>%
+  anti_join(two_choice_no_deal,by=c("poc_name_dummy"))
+two_choice_deal=beer_involved%>%
+  anti_join(only_deal,by=c("poc_name_dummy"))
+two_choice_no_deal$prediction=two_choice_no_deal$sales_volume_num*predict(tree_product,two_choice_no_deal)
+only_deal$prediction=only_deal$sales_volume_num*predict(tree_product,only_deal)
+
+two_choice_deal$prediction=0
+
+pooled=bind_rows(two_choice_deal,two_choice_no_deal,only_deal,.id="deal_or_not")
+pooled$deal_or_not[pooled$deal_or_not==2]=1
+pooled%>%
+  group_by(poc_name_dummy,beer_sub_brand_enum,deal_or_not)%>%
+  summarise(assume_no_deal=sum(prediction),real_sale=sum(sales_volume))%>%
+  ggplot(aes(x=assume_no_deal,y=real_sale,color=deal_or_not))+
+  geom_point()+
+  labs(x="预测值",y="实际订单",title="以决策树预测")+
+  xlim(0,80)+
+  ylim(0,80)+
+  coord_fixed()+
+  geom_abline(slope=1)+
+  scale_color_manual(labels=c("既有套餐又可以单买","只在套餐中出售"),values = c("red","blue"))
+ggsave("tree.png")
+###negbin
+two_choice_no_deal$prediction=predict(negbin,two_choice_no_deal)
+only_deal$prediction=predict(negbin,only_deal)
+
+two_choice_deal$prediction=0
+
+pooled=bind_rows(two_choice_deal,two_choice_no_deal,only_deal,.id="deal_or_not")
+pooled$deal_or_not[pooled$deal_or_not==2]=1
+pooled%>%
+  group_by(poc_name_dummy,beer_sub_brand_enum,deal_or_not)%>%
+  summarise(assume_no_deal=sum(prediction),real_sale=sum(sales_volume))%>%
+  ggplot(aes(x=assume_no_deal,y=real_sale,color=deal_or_not))+
+  geom_point()+
+  labs(x="预测值",y="实际订单",title="以负二项分布预测")+
+  xlim(0,80)+
+  ylim(0,80)+
+  coord_fixed()+
+  geom_abline(slope=1)+
+  scale_color_manual(labels=c("既有套餐又可以单买","只在套餐中出售"),values = c("red","blue"))
+ggsave("negbin.png")
+length(unique(pooled$poc_name_dummy))
+```
+
